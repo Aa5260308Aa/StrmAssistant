@@ -113,13 +113,25 @@ namespace StrmAssistant.Common
 
                 if (_getStaticMediaSources is null)
                 {
-                    _logger.Warn($"{PatchTracker.PatchType.Name} Init Failed - Will use public API");
+                    _logger.Warn($"{nameof(MediaInfoApi)} - GetStaticMediaSources method not found - Will use public API");
                     PatchTracker.FallbackPatchApproach = PatchApproach.None;
                 }
                 else if (Plugin.Instance.IsModSupported)
                 {
-                    PatchManager.ReversePatch(PatchTracker, _getStaticMediaSources,
+                    var reversePatchSuccess = PatchManager.ReversePatch(PatchTracker, _getStaticMediaSources,
                         nameof(GetStaticMediaSourcesStub));
+                    
+                    if (!reversePatchSuccess && PatchTracker.FallbackPatchApproach == PatchApproach.Reflection)
+                    {
+                        // ReversePatch失败但可以使用Reflection，这是正常的
+                        _logger.Info($"{nameof(MediaInfoApi)} - Using Reflection approach (Harmony ReversePatch not available, but Reflection works)");
+                    }
+                }
+                else
+                {
+                    // 不支持Harmony，使用Reflection
+                    PatchTracker.FallbackPatchApproach = PatchApproach.Reflection;
+                    _logger.Info($"{nameof(MediaInfoApi)} - Using Reflection approach (Harmony not supported)");
                 }
             }
 

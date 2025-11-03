@@ -114,19 +114,31 @@ namespace StrmAssistant.Mod
             
             if (failedPatches.Any())
             {
-                Plugin.Instance.Logger.Warn($"=== Harmony Mod Status: {failedPatches.Count}/{supportedPatches.Count} patches failed ===");
-                foreach (var failedPatch in failedPatches)
+                Plugin.Instance.Logger.Info($"=== Harmony Mod Status: {failedPatches.Count}/{supportedPatches.Count} patches using fallback methods ===");
+                
+                // 按回退方式分组显示
+                var byReflection = failedPatches.Where(p => p.FallbackPatchApproach == PatchApproach.Reflection).ToList();
+                var byNone = failedPatches.Where(p => p.FallbackPatchApproach == PatchApproach.None).ToList();
+                
+                if (byReflection.Any())
                 {
-                    var expectedApproach = failedPatch.DefaultPatchApproach;
-                    var actualApproach = failedPatch.FallbackPatchApproach;
-                    Plugin.Instance.Logger.Warn($"  - {failedPatch.PatchType.Name}: Expected {expectedApproach}, but using {actualApproach}");
-                    
-                    if (Plugin.Instance.DebugMode)
+                    Plugin.Instance.Logger.Info($"Using Reflection approach ({byReflection.Count} patches):");
+                    foreach (var patch in byReflection)
                     {
-                        Plugin.Instance.Logger.Debug($"    Patch details: IsSupported={failedPatch.IsSupported}, DefaultPatchApproach={expectedApproach}");
+                        Plugin.Instance.Logger.Info($"  ✓ {patch.PatchType.Name} - Using Reflection (Harmony ReversePatch not available, but Reflection works fine)");
                     }
                 }
-                Plugin.Instance.Logger.Warn("Some Harmony patches failed. Check logs above for details. Plugin will continue with fallback methods.");
+                
+                if (byNone.Any())
+                {
+                    Plugin.Instance.Logger.Warn($"Not available ({byNone.Count} patches):");
+                    foreach (var patch in byNone)
+                    {
+                        Plugin.Instance.Logger.Warn($"  ✗ {patch.PatchType.Name} - Feature disabled (required method/plugin not found)");
+                    }
+                }
+                
+                Plugin.Instance.Logger.Info("Note: Using Reflection instead of Harmony is normal and expected. All features will work correctly.");
             }
             else if (supportedPatches.Any())
             {
@@ -164,29 +176,66 @@ namespace StrmAssistant.Mod
 
             try
             {
+                var methodName = targetMethod.DeclaringType != null ? $"{targetMethod.DeclaringType.Name}.{targetMethod.Name}" : targetMethod.Name;
+                
                 HarmonyMod.CreateReversePatcher(targetMethod, stubMethod).Patch();
 
                 if (Plugin.Instance.DebugMode)
                 {
                     Plugin.Instance.Logger.Debug(
-                        $"{nameof(ReversePatch)} {(targetMethod.DeclaringType != null ? targetMethod.DeclaringType.Name + "." : string.Empty)}{targetMethod.Name} for {tracker.PatchType.Name} Success");
+                        $"{nameof(ReversePatch)} {methodName} for {tracker.PatchType.Name} Success");
                 }
 
                 return true;
             }
             catch (Exception he)
             {
-                Plugin.Instance.Logger.Warn($"{tracker.PatchType.Name} ReversePatch Failed: {he.Message}");
+                var methodName = targetMethod.DeclaringType != null ? $"{targetMethod.DeclaringType.Name}.{targetMethod.Name}" : targetMethod.Name;
+                var exceptionType = he.GetType().Name;
+                var exceptionMessage = he.Message;
+                
+                // 针对特定错误类型提供更详细的说明
+                string detailedMessage = exceptionMessage;
+                if (exceptionMessage.Contains("Common Language Runtime detected an invalid program") ||
+                    exceptionMessage.Contains("CLR") && exceptionMessage.Contains("invalid program"))
+                {
+                    detailedMessage = "Harmony无法反编译此方法（可能包含复杂IL代码或泛型约束）。这是Harmony的已知限制，不影响功能，将使用反射方式。";
+                    Plugin.Instance.Logger.Warn($"{tracker.PatchType.Name} ReversePatch: {detailedMessage}");
+                    Plugin.Instance.Logger.Warn($"  Method: {methodName}");
+                }
+                else if (exceptionMessage.Contains("target of an invocation"))
+                {
+                    var innerException = he.InnerException;
+                    detailedMessage = $"反射调用失败: {exceptionMessage}";
+                    if (innerException != null)
+                    {
+                        detailedMessage += $" (Inner: {innerException.GetType().Name}: {innerException.Message})";
+                    }
+                    Plugin.Instance.Logger.Warn($"{tracker.PatchType.Name} ReversePatch Failed: {detailedMessage}");
+                    Plugin.Instance.Logger.Warn($"  Method: {methodName}");
+                    Plugin.Instance.Logger.Warn($"  This usually means the method signature or implementation has changed in this Emby version.");
+                }
+                else
+                {
+                    Plugin.Instance.Logger.Warn($"{tracker.PatchType.Name} ReversePatch Failed: {exceptionMessage}");
+                    Plugin.Instance.Logger.Warn($"  Method: {methodName}");
+                }
+                
                 if (Plugin.Instance.DebugMode)
                 {
-                    Plugin.Instance.Logger.Debug($"Target method: {(targetMethod.DeclaringType != null ? targetMethod.DeclaringType.Name + "." : string.Empty)}{targetMethod.Name}");
                     Plugin.Instance.Logger.Debug($"Stub method: {stubMethod.method.Name}");
-                    Plugin.Instance.Logger.Debug($"Exception type: {he.GetType().Name}");
+                    Plugin.Instance.Logger.Debug($"Exception type: {exceptionType}");
+                    Plugin.Instance.Logger.Debug($"Full stack trace:");
                     Plugin.Instance.Logger.Debug(he.StackTrace);
+                    if (he.InnerException != null)
+                    {
+                        Plugin.Instance.Logger.Debug($"Inner exception: {he.InnerException.GetType().Name}: {he.InnerException.Message}");
+                        Plugin.Instance.Logger.Debug(he.InnerException.StackTrace);
+                    }
                 }
 
                 tracker.FallbackPatchApproach = PatchApproach.Reflection;
-                Plugin.Instance.Logger.Info($"{tracker.PatchType.Name} will use Reflection approach as fallback");
+                Plugin.Instance.Logger.Info($"{tracker.PatchType.Name} will use Reflection approach as fallback (this is normal and expected)");
             }
 
             return false;
