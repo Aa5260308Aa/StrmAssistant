@@ -1,11 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFrameworks>net6.0</TargetFrameworks>
-    <AssemblyVersion>2.0.0.26</AssemblyVersion>
-    <FileVersion>2.0.0.26</FileVersion>
+    <AssemblyVersion>2.1.0.0</AssemblyVersion>
+    <FileVersion>2.1.0.0</FileVersion>
     <CopyLocalLockFileAssemblies>True</CopyLocalLockFileAssemblies>
     <IncludeSourceRevisionInInformationalVersion>true</IncludeSourceRevisionInInformationalVersion>
-    <LangVersion>8.0</LangVersion>
+    <LangVersion>latest</LangVersion>
   </PropertyGroup>
   <ItemGroup>
     <None Remove="Tokenizer\linux\libsimple.so" />
@@ -21,12 +21,14 @@
   <ItemGroup>
     <PackageReference Include="CHTCHSConv" Version="1.0.0">
     </PackageReference>
-    <PackageReference Include="ILRepack" Version="2.0.41">
+    <PackageReference Include="ILRepack" Version="2.0.42">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
     <PackageReference Include="Lib.Harmony" Version="2.3.6" />
-    <PackageReference Include="mediabrowser.server.core" Version="4.8.5" />
+    <PackageReference Include="mediabrowser.server.core" Version="4.9.1.80">
+      <!-- 如需支持更新版本，请修改此版本号 -->
+    </PackageReference>
     <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>

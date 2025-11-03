@@ -19,6 +19,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using static StrmAssistant.Common.CommonUtility;
@@ -850,11 +851,91 @@ namespace StrmAssistant.Common
 
         public async Task<string> GetStrmMountPath(string strmPath)
         {
-            var path = strmPath.AsMemory();
-
-            using var mediaMount = await _mediaMountManager.Mount(path, null, CancellationToken.None);
+            try
+            {
+                using var mediaMount = await _mediaMountManager.Mount(strmPath, null, CancellationToken.None);
+                
+                if (mediaMount == null)
+                {
+                    Plugin.Instance.Logger.Warn($"GetStrmMountPath: Failed to mount {strmPath}");
+                    return null;
+                }
+                
+                // Emby 4.9.1.80+: IMediaMount接口变更，尝试通过反射获取实际路径
+                var type = mediaMount.GetType();
+                var mountedPath = GetMediaMountPath(mediaMount, type);
+                
+                if (!string.IsNullOrEmpty(mountedPath))
+                {
+                    return mountedPath;
+                }
+                
+                // 如果无法获取挂载路径，返回原始路径（Mount成功表示路径有效）
+                if (Plugin.Instance.DebugMode)
+                {
+                    Plugin.Instance.Logger.Debug($"GetStrmMountPath: Using original path for {strmPath} (mount path not accessible)");
+                }
+                return strmPath;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Instance.Logger.Error($"GetStrmMountPath failed for {strmPath}: {ex.Message}");
+                if (Plugin.Instance.DebugMode)
+                {
+                    Plugin.Instance.Logger.Debug(ex.StackTrace);
+                }
+                return null;
+            }
+        }
+        
+        private string GetMediaMountPath(object mediaMount, Type mountType)
+        {
+            // 尝试多种可能的属性名
+            var propertyNames = new[] { "MountedPath", "Path", "FilePath", "MountPath", "RealPath" };
             
-            return mediaMount?.MountedPath;
+            foreach (var propName in propertyNames)
+            {
+                try
+                {
+                    var property = mountType.GetProperty(propName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
+                    if (property != null)
+                    {
+                        var value = property.GetValue(mediaMount);
+                        if (value is string path && !string.IsNullOrEmpty(path))
+                        {
+                            return path;
+                        }
+                    }
+                }
+                catch
+                {
+                    // 继续尝试下一个属性
+                }
+            }
+            
+            // 尝试获取字段（某些实现可能使用字段而非属性）
+            var fieldNames = new[] { "_mountedPath", "_path", "_filePath", "mountedPath", "path" };
+            foreach (var fieldName in fieldNames)
+            {
+                try
+                {
+                    var field = mountType.GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public);
+                    if (field != null)
+                    {
+                        var value = field.GetValue(mediaMount);
+                        if (value is string path && !string.IsNullOrEmpty(path))
+                        {
+                            return path;
+                        }
+                    }
+                }
+                catch
+                {
+                    // 继续尝试下一个字段
+                }
+            }
+            
+            return null;
         }
 
         public BaseItem[] GetItemsByIds(long[] itemIds)
@@ -964,7 +1045,8 @@ namespace StrmAssistant.Common
             var folder = _fileSystem.GetDirectoryName(item.Path);
             var relatedFiles = GetRelatedPaths(basename, folder);
 
-            return new[] { new FileSystemMetadata { FullName = item.Path, IsDirectory = item.IsFolder } }
+            // Emby 4.9.1.80+: IsFolder已弃用，改用类型检查
+            return new[] { new FileSystemMetadata { FullName = item.Path, IsDirectory = item is Folder } }
                 .Concat(relatedFiles)
                 .ToArray();
         }

@@ -159,7 +159,11 @@ namespace StrmAssistant.Common
 
         public bool HasExternalSubtitleChanged(BaseItem item, IDirectoryService directoryService, bool clearCache)
         {
-            var currentExternalSubtitleFiles = _libraryManager.GetExternalSubtitleFiles(item.InternalId);
+            // Emby 4.9.1.80+: GetExternalSubtitleFiles已移除，改用GetMediaStreams获取
+            var currentExternalSubtitleFiles = item.GetMediaStreams()
+                .Where(s => s.Type == MediaStreamType.Subtitle && s.IsExternal)
+                .Select(s => s.Path)
+                .ToArray();
             var currentSet = new HashSet<string>(currentExternalSubtitleFiles, StringComparer.Ordinal);
 
             try

@@ -67,17 +67,43 @@ namespace StrmAssistant.Common
             {
                 try
                 {
-                    _getStaticMediaSources = mediaSourceManager.GetType()
-                        .GetMethod("GetStaticMediaSources",
+                    var managerType = mediaSourceManager.GetType();
+                    var currentVersion = Plugin.Instance.ApplicationHost.ApplicationVersion;
+                    
+                    // 尝试多种方法签名以支持不同版本的Emby
+                    // 新版本 (4.9.1.80+): 5个参数 (item, enablePathSubstitution, enableUserData, profile, user)
+                    _getStaticMediaSources = managerType.GetMethod("GetStaticMediaSources",
+                        BindingFlags.Public | BindingFlags.Instance,
+                        null,
+                        new[]
+                        {
+                            typeof(BaseItem), typeof(bool), typeof(bool), typeof(DeviceProfile), typeof(User)
+                        },
+                        null);
+                    
+                    // 如果找不到，尝试旧版本签名 (7个参数)
+                    if (_getStaticMediaSources == null)
+                    {
+                        _getStaticMediaSources = managerType.GetMethod("GetStaticMediaSources",
+                            BindingFlags.Public | BindingFlags.Instance,
+                            null,
                             new[]
                             {
                                 typeof(BaseItem), typeof(bool), typeof(bool), typeof(bool), typeof(LibraryOptions),
                                 typeof(DeviceProfile), typeof(User)
-                            });
-                    _fallbackApproach = true;
+                            },
+                            null);
+                    }
+                    
+                    if (_getStaticMediaSources != null)
+                    {
+                        _fallbackApproach = true;
+                        _logger.Info($"{nameof(MediaInfoApi)} - Found GetStaticMediaSources method for Emby {currentVersion}");
+                    }
                 }
                 catch (Exception e)
                 {
+                    _logger.Error($"{nameof(MediaInfoApi)} - Failed to locate GetStaticMediaSources method");
                     if (Plugin.Instance.DebugMode)
                     {
                         _logger.Debug(e.Message);
@@ -87,7 +113,7 @@ namespace StrmAssistant.Common
 
                 if (_getStaticMediaSources is null)
                 {
-                    _logger.Warn($"{PatchTracker.PatchType.Name} Init Failed");
+                    _logger.Warn($"{PatchTracker.PatchType.Name} Init Failed - Will use public API");
                     PatchTracker.FallbackPatchApproach = PatchApproach.None;
                 }
                 else if (Plugin.Instance.IsModSupported)
@@ -132,8 +158,9 @@ namespace StrmAssistant.Common
         private List<MediaSourceInfo> GetStaticMediaSourcesByApi(BaseItem item, bool enableAlternateMediaSources,
             LibraryOptions libraryOptions)
         {
-            return _mediaSourceManager.GetStaticMediaSources(item, enableAlternateMediaSources, false,
-                libraryOptions, null, null);
+            // Emby 4.9.1.80+: GetStaticMediaSources(BaseItem item, bool enablePathSubstitution, bool enableUserData, DeviceProfile profile, User user)
+            // 参数顺序: item, enablePathSubstitution, enableUserData, profile, user
+            return _mediaSourceManager.GetStaticMediaSources(item, enableAlternateMediaSources, false, null, null);
         }
 
         private List<MediaSourceInfo> GetStaticMediaSourcesByRef(BaseItem item, bool enableAlternateMediaSources,
@@ -145,10 +172,44 @@ namespace StrmAssistant.Common
                     return GetStaticMediaSourcesStub(_mediaSourceManager, item, enableAlternateMediaSources, false,
                         false, libraryOptions, null, null);
                 case PatchApproach.Reflection:
-                    return (List<MediaSourceInfo>)_getStaticMediaSources.Invoke(_mediaSourceManager,
-                        new object[] { item, enableAlternateMediaSources, false, false, libraryOptions, null, null });
+                    try
+                    {
+                        // 动态检测参数数量并调用相应的方法签名
+                        var parameters = _getStaticMediaSources.GetParameters();
+                        object[] args;
+                        
+                        if (parameters.Length == 5)
+                        {
+                            // 新版本 (4.9.1.80+): (item, enablePathSubstitution, enableUserData, profile, user)
+                            args = new object[] { item, enableAlternateMediaSources, false, null, null };
+                        }
+                        else if (parameters.Length == 7)
+                        {
+                            // 旧版本: (item, enablePathSubstitution, enableUserData, fillChapters, libraryOptions, profile, user)
+                            args = new object[] { item, enableAlternateMediaSources, false, false, libraryOptions, null, null };
+                        }
+                        else
+                        {
+                            _logger.Warn($"GetStaticMediaSources unexpected parameter count: {parameters.Length}");
+                            // 尝试使用默认参数
+                            args = new object[] { item, enableAlternateMediaSources, false, null, null };
+                        }
+                        
+                        return (List<MediaSourceInfo>)_getStaticMediaSources.Invoke(_mediaSourceManager, args);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Error($"Failed to invoke GetStaticMediaSources via reflection: {ex.Message}");
+                        if (Plugin.Instance.DebugMode)
+                        {
+                            _logger.Debug(ex.StackTrace);
+                        }
+                        // 回退到公共API
+                        return GetStaticMediaSourcesByApi(item, enableAlternateMediaSources, libraryOptions);
+                    }
                 default:
-                    throw new NotImplementedException();
+                    // 回退到公共API
+                    return GetStaticMediaSourcesByApi(item, enableAlternateMediaSources, libraryOptions);
             }
         }
 

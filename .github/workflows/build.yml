@@ -1,13 +1,16 @@
 name: Build Plugin
 
 on:
+  workflow_dispatch:  # 仅允许手动触发
   push:
     branches:
+      - main
       - tab-ui
       - simple-ui
       - lite
   pull_request:
     branches:
+      - main
       - tab-ui
       - simple-ui
       - lite
@@ -18,21 +21,35 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1  # 只获取最新提交，加快克隆速度
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v3
+        uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '6.x'
 
+      # 缓存NuGet包，大幅提升构建速度
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
       - name: Restore dependencies
-        run: dotnet restore
+        run: dotnet restore StrmAssistant/StrmAssistant.csproj
 
       - name: Build the project
-        run: dotnet build --no-restore --configuration Release
+        run: dotnet build StrmAssistant/StrmAssistant.csproj --no-restore --configuration Release -p:UseSharedCompilation=false
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: StrmAssistant
-          path: C:\Users\runneradmin\AppData\Roaming\Emby-Server\programdata\plugins\StrmAssistant${{ github.ref_name == 'lite' && 'Lite' || '' }}.dll
+          name: StrmAssistantLite-${{ github.run_number }}
+          path: |
+            StrmAssistant/bin/Release/net6.0/StrmAssistantLite.dll
+          compression-level: 0  # DLL已经是二进制，不需要压缩
+          retention-days: 30
