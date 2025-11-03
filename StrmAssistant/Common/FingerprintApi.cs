@@ -58,42 +58,64 @@ namespace StrmAssistant.Common
 
             try
             {
-                var embyProviders = Assembly.Load("Emby.Providers");
-                var audioFingerprintManager = embyProviders.GetType("Emby.Providers.Markers.AudioFingerprintManager");
-                var audioFingerprintManagerConstructor = audioFingerprintManager.GetConstructor(
-                    BindingFlags.Public | BindingFlags.Instance, null,
-                    new[]
-                    {
-                        typeof(IFileSystem), typeof(ILogger), typeof(IApplicationPaths), typeof(IFfmpegManager),
-                        typeof(IMediaEncoder), typeof(IMediaMountManager), typeof(IJsonSerializer),
-                        typeof(IServerApplicationHost)
-                    }, null);
-                _audioFingerprintManager = audioFingerprintManagerConstructor?.Invoke(new object[]
+                var embyProviders = EmbyVersionCompatibility.TryLoadAssembly("Emby.Providers");
+                if (embyProviders == null)
                 {
-                    fileSystem, _logger, applicationPaths, ffmpegManager, mediaEncoder, mediaMountManager,
-                    jsonSerializer, serverApplicationHost
-                });
-                _createTitleFingerprint = audioFingerprintManager.GetMethod("CreateTitleFingerprint",
-                    BindingFlags.Public | BindingFlags.Instance, null,
-                    new[]
-                    {
-                        typeof(Episode), typeof(LibraryOptions), typeof(IDirectoryService),
-                        typeof(CancellationToken)
-                    }, null);
-                _getAllFingerprintFilesForSeason = audioFingerprintManager.GetMethod("GetAllFingerprintFilesForSeason",
-                    BindingFlags.Public | BindingFlags.Instance);
-                _updateSequencesForSeason = audioFingerprintManager.GetMethod("UpdateSequencesForSeason",
-                    BindingFlags.Public | BindingFlags.Instance);
-                _timeoutMs = audioFingerprintManager.GetField("TimeoutMs",
-                    BindingFlags.NonPublic | BindingFlags.Instance);
+                    _logger.Error($"{nameof(FingerprintApi)} - Failed to load Emby.Providers assembly");
+                    PatchTracker.FallbackPatchApproach = PatchApproach.None;
+                    return;
+                }
 
-                PatchTimeout(Plugin.Instance.MainOptionsStore.GetOptions().GeneralOptions.MaxConcurrentCount);
+                var audioFingerprintManager = EmbyVersionCompatibility.TryGetType(embyProviders, "Emby.Providers.Markers.AudioFingerprintManager");
+                if (audioFingerprintManager != null)
+                {
+                    var audioFingerprintManagerConstructor = audioFingerprintManager.GetConstructor(
+                        BindingFlags.Public | BindingFlags.Instance, null,
+                        new[]
+                        {
+                            typeof(IFileSystem), typeof(ILogger), typeof(IApplicationPaths), typeof(IFfmpegManager),
+                            typeof(IMediaEncoder), typeof(IMediaMountManager), typeof(IJsonSerializer),
+                            typeof(IServerApplicationHost)
+                        }, null);
+                    
+                    if (audioFingerprintManagerConstructor != null)
+                    {
+                        _audioFingerprintManager = audioFingerprintManagerConstructor.Invoke(new object[]
+                        {
+                            fileSystem, _logger, applicationPaths, ffmpegManager, mediaEncoder, mediaMountManager,
+                            jsonSerializer, serverApplicationHost
+                        });
+                        
+                        _createTitleFingerprint = audioFingerprintManager.GetMethod("CreateTitleFingerprint",
+                            BindingFlags.Public | BindingFlags.Instance, null,
+                            new[]
+                            {
+                                typeof(Episode), typeof(LibraryOptions), typeof(IDirectoryService),
+                                typeof(CancellationToken)
+                            }, null);
+                        
+                        _getAllFingerprintFilesForSeason = audioFingerprintManager.GetMethod("GetAllFingerprintFilesForSeason",
+                            BindingFlags.Public | BindingFlags.Instance);
+                        
+                        _updateSequencesForSeason = audioFingerprintManager.GetMethod("UpdateSequencesForSeason",
+                            BindingFlags.Public | BindingFlags.Instance);
+                        
+                        _timeoutMs = audioFingerprintManager.GetField("TimeoutMs",
+                            BindingFlags.NonPublic | BindingFlags.Instance);
+
+                        if (_audioFingerprintManager != null && _timeoutMs != null)
+                        {
+                            PatchTimeout(Plugin.Instance.MainOptionsStore.GetOptions().GeneralOptions.MaxConcurrentCount);
+                        }
+                    }
+                }
             }
             catch (Exception e)
             {
+                _logger.Error($"{nameof(FingerprintApi)} - Initialization failed: {e.Message}");
                 if (Plugin.Instance.DebugMode)
                 {
-                    _logger.Debug(e.Message);
+                    _logger.Debug($"Exception type: {e.GetType().Name}");
                     _logger.Debug(e.StackTrace);
                 }
             }
@@ -101,16 +123,48 @@ namespace StrmAssistant.Common
             if (_audioFingerprintManager is null || _createTitleFingerprint is null ||
                 _getAllFingerprintFilesForSeason is null || _updateSequencesForSeason is null || _timeoutMs is null)
             {
-                _logger.Warn($"{PatchTracker.PatchType.Name} Init Failed");
+                var missingComponents = new List<string>();
+                if (_audioFingerprintManager == null) missingComponents.Add("AudioFingerprintManager");
+                if (_createTitleFingerprint == null) missingComponents.Add("CreateTitleFingerprint");
+                if (_getAllFingerprintFilesForSeason == null) missingComponents.Add("GetAllFingerprintFilesForSeason");
+                if (_updateSequencesForSeason == null) missingComponents.Add("UpdateSequencesForSeason");
+                if (_timeoutMs == null) missingComponents.Add("TimeoutMs");
+
+                _logger.Warn($"{nameof(FingerprintApi)} - Missing components: {string.Join(", ", missingComponents)}");
+                _logger.Info($"{nameof(FingerprintApi)} - Intro skip fingerprint feature not available on this Emby version");
+                
                 PatchTracker.FallbackPatchApproach = PatchApproach.None;
+                
+                EmbyVersionCompatibility.LogCompatibilityInfo(
+                    nameof(FingerprintApi),
+                    false,
+                    "AudioFingerprintManager not available - intro skip disabled");
             }
             else if (Plugin.Instance.IsModSupported)
             {
-                PatchManager.ReversePatch(PatchTracker, _createTitleFingerprint, nameof(CreateTitleFingerprintStub));
-                PatchManager.ReversePatch(PatchTracker, _getAllFingerprintFilesForSeason,
+                var patch1 = PatchManager.ReversePatch(PatchTracker, _createTitleFingerprint, nameof(CreateTitleFingerprintStub));
+                var patch2 = PatchManager.ReversePatch(PatchTracker, _getAllFingerprintFilesForSeason,
                     nameof(GetAllFingerprintFilesForSeasonStub));
-                PatchManager.ReversePatch(PatchTracker, _updateSequencesForSeason,
+                var patch3 = PatchManager.ReversePatch(PatchTracker, _updateSequencesForSeason,
                     nameof(UpdateSequencesForSeasonStub));
+                
+                if ((patch1 || patch2 || patch3) && PatchTracker.FallbackPatchApproach == PatchApproach.Harmony)
+                {
+                    _logger.Info($"{nameof(FingerprintApi)} - Harmony patches applied successfully");
+                }
+                
+                EmbyVersionCompatibility.LogCompatibilityInfo(
+                    nameof(FingerprintApi),
+                    true,
+                    $"Using {PatchTracker.FallbackPatchApproach} approach");
+            }
+            else
+            {
+                _logger.Info($"{nameof(FingerprintApi)} - Reflection approach active");
+                EmbyVersionCompatibility.LogCompatibilityInfo(
+                    nameof(FingerprintApi),
+                    true,
+                    "Reflection mode active");
             }
         }
 
@@ -129,13 +183,58 @@ namespace StrmAssistant.Common
             switch (PatchTracker.FallbackPatchApproach)
             {
                 case PatchApproach.Harmony:
-                    return CreateTitleFingerprintStub(_audioFingerprintManager, item, libraryOptions, directoryService,
-                        cancellationToken);
+                    try
+                    {
+                        return CreateTitleFingerprintStub(_audioFingerprintManager, item, libraryOptions, directoryService,
+                            cancellationToken);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Error($"Harmony stub failed in CreateTitleFingerprint: {ex.Message}");
+                        if (Plugin.Instance.DebugMode)
+                        {
+                            _logger.Debug(ex.StackTrace);
+                        }
+                        PatchTracker.FallbackPatchApproach = PatchApproach.Reflection;
+                        return CreateTitleFingerprint(item, directoryService, cancellationToken);
+                    }
+                    
                 case PatchApproach.Reflection:
-                    return (Task<Tuple<string, bool>>)_createTitleFingerprint.Invoke(_audioFingerprintManager,
-                        new object[] { item, libraryOptions, directoryService, cancellationToken });
+                    if (_audioFingerprintManager == null || _createTitleFingerprint == null)
+                    {
+                        _logger.Warn("AudioFingerprintManager not available");
+                        return Task.FromResult<Tuple<string, bool>>(null);
+                    }
+                    
+                    try
+                    {
+                        var result = _createTitleFingerprint.Invoke(_audioFingerprintManager,
+                            new object[] { item, libraryOptions, directoryService, cancellationToken });
+                        return result as Task<Tuple<string, bool>> ?? Task.FromResult<Tuple<string, bool>>(null);
+                    }
+                    catch (TargetInvocationException tie)
+                    {
+                        var innerEx = tie.InnerException ?? tie;
+                        _logger.Error($"Failed to invoke CreateTitleFingerprint: {innerEx.Message}");
+                        if (Plugin.Instance.DebugMode)
+                        {
+                            _logger.Debug(innerEx.StackTrace);
+                        }
+                        return Task.FromResult<Tuple<string, bool>>(null);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Error($"Reflection failed in CreateTitleFingerprint: {ex.Message}");
+                        if (Plugin.Instance.DebugMode)
+                        {
+                            _logger.Debug(ex.StackTrace);
+                        }
+                        return Task.FromResult<Tuple<string, bool>>(null);
+                    }
+                    
                 default:
-                    throw new NotImplementedException();
+                    _logger.Warn("CreateTitleFingerprint: Feature not available");
+                    return Task.FromResult<Tuple<string, bool>>(null);
             }
         }
 

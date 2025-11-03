@@ -39,21 +39,108 @@ namespace StrmAssistant.Mod
 
         protected override void OnInitialize()
         {
-            var namingAssembly = Assembly.Load("Emby.Naming");
-            var videoListResolverType = namingAssembly.GetType("Emby.Naming.Video.VideoListResolver");
-            _isEligibleForMultiVersion = videoListResolverType.GetMethod("IsEligibleForMultiVersion",
-                BindingFlags.Static | BindingFlags.NonPublic);
+            try
+            {
+                // 加载 Emby.Naming
+                var namingAssembly = EmbyVersionCompatibility.TryLoadAssembly("Emby.Naming");
+                if (namingAssembly != null)
+                {
+                    var videoListResolverType = EmbyVersionCompatibility.TryGetType(namingAssembly, "Emby.Naming.Video.VideoListResolver");
+                    if (videoListResolverType != null)
+                    {
+                        _isEligibleForMultiVersion = videoListResolverType.GetMethod("IsEligibleForMultiVersion",
+                            BindingFlags.Static | BindingFlags.NonPublic);
+                        
+                        if (_isEligibleForMultiVersion != null && Plugin.Instance.DebugMode)
+                        {
+                            Plugin.Instance.Logger.Debug("MergeMultiVersion: IsEligibleForMultiVersion method found");
+                        }
+                    }
+                }
 
-            var embyProviders = Assembly.Load("Emby.Providers");
-            var providerManager = embyProviders.GetType("Emby.Providers.Manager.ProviderManager");
-            _canRefreshImage = providerManager.GetMethod("CanRefresh", BindingFlags.Instance | BindingFlags.NonPublic);
-            _addLibrariesToPresentationUniqueKey = typeof(Series).GetMethod("AddLibrariesToPresentationUniqueKey",
-                BindingFlags.NonPublic | BindingFlags.Instance);
+                // 加载 Emby.Providers
+                var embyProviders = EmbyVersionCompatibility.TryLoadAssembly("Emby.Providers");
+                if (embyProviders != null)
+                {
+                    var providerManager = EmbyVersionCompatibility.TryGetType(embyProviders, "Emby.Providers.Manager.ProviderManager");
+                    if (providerManager != null)
+                    {
+                        _canRefreshImage = providerManager.GetMethod("CanRefresh", BindingFlags.Instance | BindingFlags.NonPublic);
+                        
+                        if (_canRefreshImage != null && Plugin.Instance.DebugMode)
+                        {
+                            Plugin.Instance.Logger.Debug("MergeMultiVersion: CanRefresh method found");
+                        }
+                    }
+                }
 
-            var embyApi = Assembly.Load("Emby.Api");
-            var itemRefreshService = embyApi.GetType("Emby.Api.ItemRefreshService");
-            _getRefreshOptions =
-                itemRefreshService.GetMethod("GetRefreshOptions", BindingFlags.Instance | BindingFlags.NonPublic);
+                // 获取 Series 的方法
+                _addLibrariesToPresentationUniqueKey = typeof(Series).GetMethod("AddLibrariesToPresentationUniqueKey",
+                    BindingFlags.NonPublic | BindingFlags.Instance);
+                
+                if (_addLibrariesToPresentationUniqueKey != null && Plugin.Instance.DebugMode)
+                {
+                    Plugin.Instance.Logger.Debug("MergeMultiVersion: AddLibrariesToPresentationUniqueKey method found");
+                }
+
+                // 加载 Emby.Api
+                var embyApi = EmbyVersionCompatibility.TryLoadAssembly("Emby.Api");
+                if (embyApi != null)
+                {
+                    var itemRefreshService = EmbyVersionCompatibility.TryGetType(embyApi, "Emby.Api.ItemRefreshService");
+                    if (itemRefreshService != null)
+                    {
+                        _getRefreshOptions = itemRefreshService.GetMethod("GetRefreshOptions", 
+                            BindingFlags.Instance | BindingFlags.NonPublic);
+                        
+                        if (_getRefreshOptions != null && Plugin.Instance.DebugMode)
+                        {
+                            Plugin.Instance.Logger.Debug("MergeMultiVersion: GetRefreshOptions method found");
+                        }
+                    }
+                }
+
+                // 验证所有必需的组件
+                var missingComponents = new List<string>();
+                if (_isEligibleForMultiVersion == null) missingComponents.Add("IsEligibleForMultiVersion");
+                if (_canRefreshImage == null) missingComponents.Add("CanRefresh");
+                if (_addLibrariesToPresentationUniqueKey == null) missingComponents.Add("AddLibrariesToPresentationUniqueKey");
+                if (_getRefreshOptions == null) missingComponents.Add("GetRefreshOptions");
+
+                if (missingComponents.Any())
+                {
+                    Plugin.Instance.Logger.Warn($"MergeMultiVersion: Missing components - {string.Join(", ", missingComponents)}");
+                    Plugin.Instance.Logger.Warn("Multi-version merge may not work fully on this Emby version");
+                    
+                    EmbyVersionCompatibility.LogCompatibilityInfo(
+                        nameof(MergeMultiVersion),
+                        false,
+                        $"{missingComponents.Count} required methods not found");
+                }
+                else
+                {
+                    Plugin.Instance.Logger.Info("MergeMultiVersion: All components loaded successfully");
+                    
+                    EmbyVersionCompatibility.LogCompatibilityInfo(
+                        nameof(MergeMultiVersion),
+                        true,
+                        "All required components available");
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Instance.Logger.Error($"MergeMultiVersion initialization failed: {ex.Message}");
+                if (Plugin.Instance.DebugMode)
+                {
+                    Plugin.Instance.Logger.Debug($"Exception type: {ex.GetType().Name}");
+                    Plugin.Instance.Logger.Debug(ex.StackTrace);
+                }
+                
+                EmbyVersionCompatibility.LogCompatibilityInfo(
+                    nameof(MergeMultiVersion),
+                    false,
+                    "Initialization error - feature may be limited");
+            }
         }
 
         protected override void Prepare(bool apply)

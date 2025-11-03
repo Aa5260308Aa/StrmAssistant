@@ -63,30 +63,101 @@ namespace StrmAssistant.Mod
 
         protected override void OnInitialize()
         {
-            var sqlitePCLEx = Assembly.Load("SQLitePCLRawEx.core");
-            raw = sqlitePCLEx.GetType("SQLitePCLEx.raw");
-            sqlite3_enable_load_extension = raw.GetMethod("sqlite3_enable_load_extension",
-                BindingFlags.Static | BindingFlags.Public);
+            try
+            {
+                // 加载 SQLitePCLRawEx
+                var sqlitePCLEx = EmbyVersionCompatibility.TryLoadAssembly("SQLitePCLRawEx.core");
+                if (sqlitePCLEx != null)
+                {
+                    raw = EmbyVersionCompatibility.TryGetType(sqlitePCLEx, "SQLitePCLEx.raw");
+                    if (raw != null)
+                    {
+                        sqlite3_enable_load_extension = raw.GetMethod("sqlite3_enable_load_extension",
+                            BindingFlags.Static | BindingFlags.Public);
+                    }
+                }
 
-            sqlite3_db =
-                typeof(SQLiteDatabaseConnection).GetField("db", BindingFlags.NonPublic | BindingFlags.Instance);
+                // 获取 SQLite 数据库连接字段
+                sqlite3_db = typeof(SQLiteDatabaseConnection).GetField("db", BindingFlags.NonPublic | BindingFlags.Instance);
 
-            var embySqlite = Assembly.Load("Emby.Sqlite");
-            var baseSqliteRepository = embySqlite.GetType("Emby.Sqlite.BaseSqliteRepository");
-            _createConnection = baseSqliteRepository.GetMethod("CreateConnection",
-                BindingFlags.NonPublic | BindingFlags.Instance);
-            _dbFilePath =
-                baseSqliteRepository.GetProperty("DbFilePath", BindingFlags.NonPublic | BindingFlags.Instance);
+                // 加载 Emby.Sqlite
+                var embySqlite = EmbyVersionCompatibility.TryLoadAssembly("Emby.Sqlite");
+                if (embySqlite != null)
+                {
+                    var baseSqliteRepository = EmbyVersionCompatibility.TryGetType(embySqlite, "Emby.Sqlite.BaseSqliteRepository");
+                    if (baseSqliteRepository != null)
+                    {
+                        _createConnection = baseSqliteRepository.GetMethod("CreateConnection",
+                            BindingFlags.NonPublic | BindingFlags.Instance);
+                        _dbFilePath = baseSqliteRepository.GetProperty("DbFilePath", 
+                            BindingFlags.NonPublic | BindingFlags.Instance);
+                    }
+                }
 
-            var embyServerImplementationsAssembly = Assembly.Load("Emby.Server.Implementations");
-            var sqliteItemRepository =
-                embyServerImplementationsAssembly.GetType("Emby.Server.Implementations.Data.SqliteItemRepository");
-            _getJoinCommandText = sqliteItemRepository.GetMethod("GetJoinCommandText",
-                BindingFlags.NonPublic | BindingFlags.Instance);
-            _createSearchTerm =
-                sqliteItemRepository.GetMethod("CreateSearchTerm", BindingFlags.NonPublic | BindingFlags.Static);
-            _cacheIdsFromTextParams = sqliteItemRepository.GetMethod("CacheIdsFromTextParams",
-                BindingFlags.Instance | BindingFlags.NonPublic);
+                // 加载 Emby.Server.Implementations
+                var embyServerImplementationsAssembly = EmbyVersionCompatibility.TryLoadAssembly("Emby.Server.Implementations");
+                if (embyServerImplementationsAssembly != null)
+                {
+                    var sqliteItemRepository = EmbyVersionCompatibility.TryGetType(
+                        embyServerImplementationsAssembly, 
+                        "Emby.Server.Implementations.Data.SqliteItemRepository");
+                    
+                    if (sqliteItemRepository != null)
+                    {
+                        _getJoinCommandText = sqliteItemRepository.GetMethod("GetJoinCommandText",
+                            BindingFlags.NonPublic | BindingFlags.Instance);
+                        _createSearchTerm = sqliteItemRepository.GetMethod("CreateSearchTerm", 
+                            BindingFlags.NonPublic | BindingFlags.Static);
+                        _cacheIdsFromTextParams = sqliteItemRepository.GetMethod("CacheIdsFromTextParams",
+                            BindingFlags.Instance | BindingFlags.NonPublic);
+                    }
+                }
+
+                // 验证所有必需的组件
+                var missingComponents = new List<string>();
+                if (raw == null) missingComponents.Add("SQLitePCLEx.raw");
+                if (sqlite3_enable_load_extension == null) missingComponents.Add("sqlite3_enable_load_extension");
+                if (sqlite3_db == null) missingComponents.Add("SQLiteDatabaseConnection.db");
+                if (_createConnection == null) missingComponents.Add("CreateConnection");
+                if (_dbFilePath == null) missingComponents.Add("DbFilePath");
+                if (_getJoinCommandText == null) missingComponents.Add("GetJoinCommandText");
+                if (_createSearchTerm == null) missingComponents.Add("CreateSearchTerm");
+                if (_cacheIdsFromTextParams == null) missingComponents.Add("CacheIdsFromTextParams");
+
+                if (missingComponents.Any())
+                {
+                    Plugin.Instance.Logger.Warn($"EnhanceChineseSearch: Missing components - {string.Join(", ", missingComponents)}");
+                    Plugin.Instance.Logger.Warn("Chinese search enhancement may not work on this Emby version");
+                    
+                    EmbyVersionCompatibility.LogCompatibilityInfo(
+                        nameof(EnhanceChineseSearch),
+                        false,
+                        $"{missingComponents.Count} required components not found");
+                }
+                else
+                {
+                    Plugin.Instance.Logger.Info("EnhanceChineseSearch: All components loaded successfully");
+                    
+                    EmbyVersionCompatibility.LogCompatibilityInfo(
+                        nameof(EnhanceChineseSearch),
+                        true,
+                        "All required SQLite components available");
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Instance.Logger.Error($"EnhanceChineseSearch initialization failed: {ex.Message}");
+                if (Plugin.Instance.DebugMode)
+                {
+                    Plugin.Instance.Logger.Debug($"Exception type: {ex.GetType().Name}");
+                    Plugin.Instance.Logger.Debug(ex.StackTrace);
+                }
+                
+                EmbyVersionCompatibility.LogCompatibilityInfo(
+                    nameof(EnhanceChineseSearch),
+                    false,
+                    "Initialization error - feature disabled");
+            }
         }
 
         protected override void Prepare(bool apply)

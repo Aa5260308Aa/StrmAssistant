@@ -46,42 +46,92 @@ namespace StrmAssistant.Common
 
             try
             {
-                var embyProviders = Assembly.Load("Emby.Providers");
-                var thumbnailGenerator = embyProviders.GetType("Emby.Providers.MediaInfo.ThumbnailGenerator");
-                var thumbnailGeneratorConstructor = thumbnailGenerator.GetConstructor(
-                    BindingFlags.Public | BindingFlags.Instance, null,
-                    new[]
-                    {
-                        typeof(IFileSystem), typeof(ILogger), typeof(IImageExtractionManager),
-                        typeof(IItemRepository), typeof(IMediaMountManager), typeof(IServerApplicationPaths),
-                        typeof(ILibraryMonitor), typeof(IFfmpegManager)
-                    }, null);
-                _thumbnailGenerator = thumbnailGeneratorConstructor?.Invoke(new object[]
+                var embyProviders = EmbyVersionCompatibility.TryLoadAssembly("Emby.Providers");
+                if (embyProviders == null)
                 {
-                    fileSystem, _logger, imageExtractionManager, itemRepository, mediaMountManager,
-                    applicationPaths, libraryMonitor, ffmpegManager
-                });
-                _refreshThumbnailImages = thumbnailGenerator.GetMethod("RefreshThumbnailImages",
-                    BindingFlags.Public | BindingFlags.Instance);
+                    _logger.Error($"{nameof(VideoThumbnailApi)} - Failed to load Emby.Providers assembly");
+                    PatchTracker.FallbackPatchApproach = PatchApproach.None;
+                    return;
+                }
+
+                var thumbnailGenerator = EmbyVersionCompatibility.TryGetType(embyProviders, "Emby.Providers.MediaInfo.ThumbnailGenerator");
+                if (thumbnailGenerator != null)
+                {
+                    var thumbnailGeneratorConstructor = thumbnailGenerator.GetConstructor(
+                        BindingFlags.Public | BindingFlags.Instance, null,
+                        new[]
+                        {
+                            typeof(IFileSystem), typeof(ILogger), typeof(IImageExtractionManager),
+                            typeof(IItemRepository), typeof(IMediaMountManager), typeof(IServerApplicationPaths),
+                            typeof(ILibraryMonitor), typeof(IFfmpegManager)
+                        }, null);
+                    
+                    if (thumbnailGeneratorConstructor != null)
+                    {
+                        _thumbnailGenerator = thumbnailGeneratorConstructor.Invoke(new object[]
+                        {
+                            fileSystem, _logger, imageExtractionManager, itemRepository, mediaMountManager,
+                            applicationPaths, libraryMonitor, ffmpegManager
+                        });
+                        
+                        _refreshThumbnailImages = thumbnailGenerator.GetMethod("RefreshThumbnailImages",
+                            BindingFlags.Public | BindingFlags.Instance);
+                        
+                        if (Plugin.Instance.DebugMode && _refreshThumbnailImages != null)
+                        {
+                            _logger.Debug($"{nameof(VideoThumbnailApi)}: RefreshThumbnailImages method found");
+                        }
+                    }
+                }
             }
             catch (Exception e)
             {
+                _logger.Error($"{nameof(VideoThumbnailApi)} - Initialization failed: {e.Message}");
                 if (Plugin.Instance.DebugMode)
                 {
-                    _logger.Debug(e.Message);
+                    _logger.Debug($"Exception type: {e.GetType().Name}");
                     _logger.Debug(e.StackTrace);
                 }
             }
 
             if (_thumbnailGenerator is null || _refreshThumbnailImages is null)
             {
-                _logger.Warn($"{PatchTracker.PatchType.Name} Init Failed");
+                var missingComponents = new List<string>();
+                if (_thumbnailGenerator == null) missingComponents.Add("ThumbnailGenerator");
+                if (_refreshThumbnailImages == null) missingComponents.Add("RefreshThumbnailImages");
+
+                _logger.Warn($"{nameof(VideoThumbnailApi)} - Missing components: {string.Join(", ", missingComponents)}");
+                _logger.Info($"{nameof(VideoThumbnailApi)} - Video thumbnail extraction not available on this Emby version");
+                
                 PatchTracker.FallbackPatchApproach = PatchApproach.None;
+                
+                EmbyVersionCompatibility.LogCompatibilityInfo(
+                    nameof(VideoThumbnailApi),
+                    false,
+                    "ThumbnailGenerator not available");
             }
             else if (Plugin.Instance.IsModSupported)
             {
-                PatchManager.ReversePatch(PatchTracker, _refreshThumbnailImages,
-                    AppVer >= Ver4936 ? nameof(RefreshThumbnailImagesStub49) : nameof(RefreshThumbnailImagesStub48));
+                var stubName = AppVer >= Ver4936 ? nameof(RefreshThumbnailImagesStub49) : nameof(RefreshThumbnailImagesStub48);
+                var patchSuccess = PatchManager.ReversePatch(PatchTracker, _refreshThumbnailImages, stubName);
+                
+                if (patchSuccess && PatchTracker.FallbackPatchApproach == PatchApproach.Harmony)
+                {
+                    _logger.Info($"{nameof(VideoThumbnailApi)} - Harmony patch applied (version {(AppVer >= Ver4936 ? "4.9.0.36+" : "4.8.x")})");
+                }
+                
+                EmbyVersionCompatibility.LogCompatibilityInfo(
+                    nameof(VideoThumbnailApi),
+                    true,
+                    $"Using {PatchTracker.FallbackPatchApproach} approach for Emby {AppVer}");
+            }
+            else
+            {
+                _logger.Info($"{nameof(VideoThumbnailApi)} - Reflection approach active");
+                EmbyVersionCompatibility.LogCompatibilityInfo(
+                    nameof(VideoThumbnailApi),
+                    true,
+                    "Reflection mode active");
             }
         }
 
@@ -111,29 +161,73 @@ namespace StrmAssistant.Common
             switch (PatchTracker.FallbackPatchApproach)
             {
                 case PatchApproach.Harmony:
-                    return AppVer >= Ver4936
-                        ? RefreshThumbnailImagesStub49(_thumbnailGenerator, item, mediaSource, null, libraryOptions,
-                            directoryService, chapters, extractImages, saveChapters, cancellationToken)
-                        : RefreshThumbnailImagesStub48(_thumbnailGenerator, item, null, libraryOptions,
-                            directoryService, chapters, extractImages, saveChapters, cancellationToken);
+                    try
+                    {
+                        return AppVer >= Ver4936
+                            ? RefreshThumbnailImagesStub49(_thumbnailGenerator, item, mediaSource, null, libraryOptions,
+                                directoryService, chapters, extractImages, saveChapters, cancellationToken)
+                            : RefreshThumbnailImagesStub48(_thumbnailGenerator, item, null, libraryOptions,
+                                directoryService, chapters, extractImages, saveChapters, cancellationToken);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Error($"Harmony stub failed in RefreshThumbnailImages: {ex.Message}");
+                        if (Plugin.Instance.DebugMode)
+                        {
+                            _logger.Debug(ex.StackTrace);
+                        }
+                        PatchTracker.FallbackPatchApproach = PatchApproach.Reflection;
+                        return RefreshThumbnailImages(item, libraryOptions, directoryService, chapters, extractImages, saveChapters, cancellationToken);
+                    }
+                    
                 case PatchApproach.Reflection:
                 {
-                    var parameters = AppVer >= Ver4936
-                        ? new object[]
-                        {
-                            item, mediaSource, null, libraryOptions, directoryService, chapters, extractImages,
-                            saveChapters, cancellationToken
-                        }
-                        : new object[]
-                        {
-                            item, null, libraryOptions, directoryService, chapters, extractImages, saveChapters,
-                            cancellationToken
-                        };
+                    if (_thumbnailGenerator == null || _refreshThumbnailImages == null)
+                    {
+                        _logger.Warn("ThumbnailGenerator not available");
+                        return Task.FromResult(false);
+                    }
+                    
+                    try
+                    {
+                        var parameters = AppVer >= Ver4936
+                            ? new object[]
+                            {
+                                item, mediaSource, null, libraryOptions, directoryService, chapters, extractImages,
+                                saveChapters, cancellationToken
+                            }
+                            : new object[]
+                            {
+                                item, null, libraryOptions, directoryService, chapters, extractImages, saveChapters,
+                                cancellationToken
+                            };
 
-                    return (Task<bool>)_refreshThumbnailImages.Invoke(_thumbnailGenerator, parameters);
+                        var result = _refreshThumbnailImages.Invoke(_thumbnailGenerator, parameters);
+                        return result as Task<bool> ?? Task.FromResult(false);
+                    }
+                    catch (TargetInvocationException tie)
+                    {
+                        var innerEx = tie.InnerException ?? tie;
+                        _logger.Error($"Failed to invoke RefreshThumbnailImages: {innerEx.Message}");
+                        if (Plugin.Instance.DebugMode)
+                        {
+                            _logger.Debug(innerEx.StackTrace);
+                        }
+                        return Task.FromResult(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Error($"Reflection failed in RefreshThumbnailImages: {ex.Message}");
+                        if (Plugin.Instance.DebugMode)
+                        {
+                            _logger.Debug(ex.StackTrace);
+                        }
+                        return Task.FromResult(false);
+                    }
                 }
                 default:
-                    throw new NotImplementedException();
+                    _logger.Warn("RefreshThumbnailImages: Feature not available");
+                    return Task.FromResult(false);
             }
         }
 

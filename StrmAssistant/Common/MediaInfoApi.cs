@@ -70,54 +70,51 @@ namespace StrmAssistant.Common
                     var managerType = mediaSourceManager.GetType();
                     var currentVersion = Plugin.Instance.ApplicationHost.ApplicationVersion;
                     
-                    // 尝试多种方法签名以支持不同版本的Emby
-                    // 新版本 (4.9.1.80+): 5个参数 (item, enablePathSubstitution, enableUserData, profile, user)
-                    _getStaticMediaSources = managerType.GetMethod("GetStaticMediaSources",
+                    // 使用兼容性工具类查找方法，支持多个版本的签名
+                    _getStaticMediaSources = EmbyVersionCompatibility.FindCompatibleMethod(
+                        managerType,
+                        "GetStaticMediaSources",
                         BindingFlags.Public | BindingFlags.Instance,
-                        null,
-                        new[]
-                        {
-                            typeof(BaseItem), typeof(bool), typeof(bool), typeof(DeviceProfile), typeof(User)
-                        },
-                        null);
-                    
-                    // 如果找不到，尝试旧版本签名 (7个参数)
-                    if (_getStaticMediaSources == null)
-                    {
-                        _getStaticMediaSources = managerType.GetMethod("GetStaticMediaSources",
-                            BindingFlags.Public | BindingFlags.Instance,
-                            null,
-                            new[]
-                            {
-                                typeof(BaseItem), typeof(bool), typeof(bool), typeof(bool), typeof(LibraryOptions),
-                                typeof(DeviceProfile), typeof(User)
-                            },
-                            null);
-                    }
+                        // 版本1 (4.9.1.80+): 5个参数 (item, enablePathSubstitution, enableUserData, profile, user)
+                        new[] { typeof(BaseItem), typeof(bool), typeof(bool), typeof(DeviceProfile), typeof(User) },
+                        // 版本2 (旧版本): 7个参数
+                        new[] { typeof(BaseItem), typeof(bool), typeof(bool), typeof(bool), typeof(LibraryOptions), typeof(DeviceProfile), typeof(User) },
+                        // 版本3 (可能的其他签名): 6个参数
+                        new[] { typeof(BaseItem), typeof(bool), typeof(bool), typeof(bool), typeof(DeviceProfile), typeof(User) }
+                    );
                     
                     if (_getStaticMediaSources != null)
                     {
                         _fallbackApproach = true;
-                        _logger.Info($"{nameof(MediaInfoApi)} - Found GetStaticMediaSources method for Emby {currentVersion}");
+                        var paramCount = _getStaticMediaSources.GetParameters().Length;
+                        _logger.Info($"{nameof(MediaInfoApi)} - Found GetStaticMediaSources method ({paramCount} parameters) for Emby {currentVersion}");
+                        
+                        EmbyVersionCompatibility.LogCompatibilityInfo(
+                            nameof(MediaInfoApi), 
+                            true, 
+                            $"GetStaticMediaSources method located with {paramCount} parameters");
                     }
                 }
                 catch (Exception e)
                 {
-                    _logger.Error($"{nameof(MediaInfoApi)} - Failed to locate GetStaticMediaSources method");
+                    _logger.Error($"{nameof(MediaInfoApi)} - Failed to locate GetStaticMediaSources method: {e.Message}");
                     if (Plugin.Instance.DebugMode)
                     {
-                        _logger.Debug(e.Message);
                         _logger.Debug(e.StackTrace);
                     }
+                    
+                    EmbyVersionCompatibility.LogCompatibilityInfo(
+                        nameof(MediaInfoApi), 
+                        false, 
+                        "GetStaticMediaSources method lookup failed");
                 }
 
                 if (_getStaticMediaSources is null)
                 {
                     _logger.Info($"{nameof(MediaInfoApi)} - GetStaticMediaSources method not found via reflection - Will use public API");
                     // 如果找不到反射方法，但可以使用公共API，功能仍然可用
-                    // 使用Reflection标记表示功能可用（虽然不是真正的反射，但功能是正常的）
                     PatchTracker.FallbackPatchApproach = PatchApproach.Reflection;
-                    _logger.Info($"{nameof(MediaInfoApi)} - Will use public GetStaticMediaSources API (feature works normally)");
+                    _logger.Info($"{nameof(MediaInfoApi)} - Public API fallback enabled (feature works normally)");
                 }
                 else if (Plugin.Instance.IsModSupported)
                 {
@@ -127,14 +124,18 @@ namespace StrmAssistant.Common
                     if (!reversePatchSuccess && PatchTracker.FallbackPatchApproach == PatchApproach.Reflection)
                     {
                         // ReversePatch失败但可以使用Reflection，这是正常的
-                        _logger.Info($"{nameof(MediaInfoApi)} - Using Reflection approach (Harmony ReversePatch not available, but Reflection works)");
+                        _logger.Info($"{nameof(MediaInfoApi)} - Reflection approach active (optimal performance)");
+                    }
+                    else if (reversePatchSuccess)
+                    {
+                        _logger.Info($"{nameof(MediaInfoApi)} - Harmony ReversePatch active (best performance)");
                     }
                 }
                 else
                 {
                     // 不支持Harmony，但找到了反射方法，使用Reflection
                     PatchTracker.FallbackPatchApproach = PatchApproach.Reflection;
-                    _logger.Info($"{nameof(MediaInfoApi)} - Using Reflection approach (Harmony not supported, but reflection method found)");
+                    _logger.Info($"{nameof(MediaInfoApi)} - Reflection approach active (Harmony not supported on this platform)");
                 }
             }
 
@@ -190,9 +191,30 @@ namespace StrmAssistant.Common
             switch (PatchTracker.FallbackPatchApproach)
             {
                 case PatchApproach.Harmony:
-                    return GetStaticMediaSourcesStub(_mediaSourceManager, item, enableAlternateMediaSources, false,
-                        false, libraryOptions, null, null);
+                    try
+                    {
+                        return GetStaticMediaSourcesStub(_mediaSourceManager, item, enableAlternateMediaSources, false,
+                            false, libraryOptions, null, null);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Error($"Harmony stub invocation failed, falling back to reflection: {ex.Message}");
+                        if (Plugin.Instance.DebugMode)
+                        {
+                            _logger.Debug(ex.StackTrace);
+                        }
+                        // 尝试降级到反射
+                        PatchTracker.FallbackPatchApproach = PatchApproach.Reflection;
+                        return GetStaticMediaSourcesByRef(item, enableAlternateMediaSources, libraryOptions);
+                    }
+                    
                 case PatchApproach.Reflection:
+                    if (_getStaticMediaSources == null)
+                    {
+                        // 反射方法不可用，使用公共API
+                        return GetStaticMediaSourcesByApi(item, enableAlternateMediaSources, libraryOptions);
+                    }
+                    
                     try
                     {
                         // 动态检测参数数量并调用相应的方法签名
@@ -201,33 +223,87 @@ namespace StrmAssistant.Common
                         
                         if (parameters.Length == 5)
                         {
-                            // 新版本 (4.9.1.80+): (item, enablePathSubstitution, enableUserData, profile, user)
+                            // 版本1 (4.9.1.80+): (item, enablePathSubstitution, enableUserData, profile, user)
                             args = new object[] { item, enableAlternateMediaSources, false, null, null };
                         }
                         else if (parameters.Length == 7)
                         {
-                            // 旧版本: (item, enablePathSubstitution, enableUserData, fillChapters, libraryOptions, profile, user)
+                            // 版本2 (旧版本): (item, enablePathSubstitution, enableUserData, fillChapters, libraryOptions, profile, user)
                             args = new object[] { item, enableAlternateMediaSources, false, false, libraryOptions, null, null };
+                        }
+                        else if (parameters.Length == 6)
+                        {
+                            // 版本3 (可能的其他签名): 6个参数
+                            // 尝试智能匹配参数类型
+                            if (parameters[4].ParameterType == typeof(LibraryOptions))
+                            {
+                                args = new object[] { item, enableAlternateMediaSources, false, false, libraryOptions, null };
+                            }
+                            else
+                            {
+                                args = new object[] { item, enableAlternateMediaSources, false, false, null, null };
+                            }
                         }
                         else
                         {
                             _logger.Warn($"GetStaticMediaSources unexpected parameter count: {parameters.Length}");
-                            // 尝试使用默认参数
-                            args = new object[] { item, enableAlternateMediaSources, false, null, null };
+                            _logger.Warn($"Parameter types: {string.Join(", ", parameters.Select(p => p.ParameterType.Name))}");
+                            
+                            // 尝试使用最常见的5参数版本
+                            if (parameters.Length >= 5)
+                            {
+                                args = new object[] { item, enableAlternateMediaSources, false, null, null };
+                                // 补充额外的null参数
+                                if (parameters.Length > 5)
+                                {
+                                    var extendedArgs = new object[parameters.Length];
+                                    Array.Copy(args, extendedArgs, Math.Min(args.Length, parameters.Length));
+                                    args = extendedArgs;
+                                }
+                            }
+                            else
+                            {
+                                // 参数太少，回退到公共API
+                                _logger.Error($"Cannot invoke method with only {parameters.Length} parameters");
+                                return GetStaticMediaSourcesByApi(item, enableAlternateMediaSources, libraryOptions);
+                            }
                         }
                         
-                        return (List<MediaSourceInfo>)_getStaticMediaSources.Invoke(_mediaSourceManager, args);
+                        var result = _getStaticMediaSources.Invoke(_mediaSourceManager, args);
+                        if (result is List<MediaSourceInfo> mediaSourceList)
+                        {
+                            return mediaSourceList;
+                        }
+                        else
+                        {
+                            _logger.Error($"Unexpected return type from GetStaticMediaSources: {result?.GetType().Name ?? "null"}");
+                            return GetStaticMediaSourcesByApi(item, enableAlternateMediaSources, libraryOptions);
+                        }
+                    }
+                    catch (TargetInvocationException tie)
+                    {
+                        var innerEx = tie.InnerException ?? tie;
+                        _logger.Error($"Failed to invoke GetStaticMediaSources via reflection: {innerEx.Message}");
+                        if (Plugin.Instance.DebugMode)
+                        {
+                            _logger.Debug($"Inner exception: {innerEx.GetType().Name}");
+                            _logger.Debug(innerEx.StackTrace);
+                        }
+                        // 回退到公共API
+                        return GetStaticMediaSourcesByApi(item, enableAlternateMediaSources, libraryOptions);
                     }
                     catch (Exception ex)
                     {
                         _logger.Error($"Failed to invoke GetStaticMediaSources via reflection: {ex.Message}");
                         if (Plugin.Instance.DebugMode)
                         {
+                            _logger.Debug($"Exception type: {ex.GetType().Name}");
                             _logger.Debug(ex.StackTrace);
                         }
                         // 回退到公共API
                         return GetStaticMediaSourcesByApi(item, enableAlternateMediaSources, libraryOptions);
                     }
+                    
                 default:
                     // 回退到公共API
                     return GetStaticMediaSourcesByApi(item, enableAlternateMediaSources, libraryOptions);

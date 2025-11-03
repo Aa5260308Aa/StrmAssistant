@@ -135,26 +135,61 @@ namespace StrmAssistant.Mod
 
         private static void PatchResourcePoolByReflection()
         {
-            //works only with modded Emby.Server.MediaEncoding.dll
+            // 此方法需要修改后的 Emby.Server.MediaEncoding.dll，或者在某些版本中字段是可写的
 
             try
             {
+                if (_resourcePoolField == null)
+                {
+                    Plugin.Instance.Logger.Warn("EnableImageCapture: ResourcePool field not found - Cannot control FFmpeg concurrency");
+                    Plugin.Instance.Logger.Info("Image capture will still work but may not respect custom concurrency limits");
+                    // 功能部分可用，不完全禁用
+                    return;
+                }
+
+                // 检查字段是否为只读
+                if (_resourcePoolField.IsInitOnly)
+                {
+                    Plugin.Instance.Logger.Info("EnableImageCapture: ResourcePool is readonly - Using alternative approach");
+                    // 尝试其他方式或接受限制
+                    Plugin.Instance.Logger.Info("Custom FFmpeg concurrency control not available on this Emby version");
+                    Plugin.Instance.Logger.Info("Image capture feature will use default Emby concurrency settings");
+                    return;
+                }
+
                 _resourcePoolField.SetValue(null, SemaphoreFFmpeg);
 
+                Plugin.Instance.Logger.Info($"EnableImageCapture: FFmpeg ResourcePool patched successfully (max concurrent: {SemaphoreFFmpegMaxCount})");
+                
                 if (Plugin.Instance.DebugMode)
                 {
                     Plugin.Instance.Logger.Debug("Patch FFmpeg ResourcePool Success by Reflection");
                 }
             }
+            catch (FieldAccessException fae)
+            {
+                Plugin.Instance.Logger.Warn("EnableImageCapture: Cannot modify ResourcePool field (access denied)");
+                Plugin.Instance.Logger.Info("Image capture will use default Emby settings");
+                if (Plugin.Instance.DebugMode)
+                {
+                    Plugin.Instance.Logger.Debug($"FieldAccessException: {fae.Message}");
+                }
+                // 不设置为None，功能仍然可用
+            }
             catch (Exception re)
             {
+                Plugin.Instance.Logger.Warn($"EnableImageCapture: Failed to patch ResourcePool via reflection: {re.Message}");
+                Plugin.Instance.Logger.Info("Image capture will use default Emby concurrency settings");
+                
                 if (Plugin.Instance.DebugMode)
                 {
                     Plugin.Instance.Logger.Debug("Patch FFmpeg ResourcePool Failed by Reflection");
-                    Plugin.Instance.Logger.Debug(re.Message);
+                    Plugin.Instance.Logger.Debug($"Exception type: {re.GetType().Name}");
+                    Plugin.Instance.Logger.Debug(re.StackTrace);
                 }
 
-                Instance.PatchTracker.FallbackPatchApproach = PatchApproach.None;
+                // ResourcePool修改失败不应该完全禁用ImageCapture功能
+                // 只是无法自定义并发控制，但基本功能仍然可用
             }
         }
 

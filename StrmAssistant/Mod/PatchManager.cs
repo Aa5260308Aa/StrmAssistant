@@ -257,12 +257,22 @@ namespace StrmAssistant.Mod
                 
                 // 针对特定错误类型提供更详细的说明
                 string detailedMessage = exceptionMessage;
+                bool isKnownLimitation = false;
+                
                 if (exceptionMessage.Contains("Common Language Runtime detected an invalid program") ||
-                    exceptionMessage.Contains("CLR") && exceptionMessage.Contains("invalid program"))
+                    (exceptionMessage.Contains("CLR") && exceptionMessage.Contains("invalid program")))
                 {
                     detailedMessage = "Harmony无法反编译此方法（可能包含复杂IL代码或泛型约束）。这是Harmony的已知限制，不影响功能，将使用反射方式。";
-                    Plugin.Instance.Logger.Warn($"{tracker.PatchType.Name} ReversePatch: {detailedMessage}");
-                    Plugin.Instance.Logger.Warn($"  Method: {methodName}");
+                    isKnownLimitation = true;
+                    if (!Plugin.Instance.DebugMode)
+                    {
+                        Plugin.Instance.Logger.Info($"{tracker.PatchType.Name}: {detailedMessage}");
+                    }
+                    else
+                    {
+                        Plugin.Instance.Logger.Warn($"{tracker.PatchType.Name} ReversePatch: {detailedMessage}");
+                        Plugin.Instance.Logger.Warn($"  Method: {methodName}");
+                    }
                 }
                 else if (exceptionMessage.Contains("target of an invocation"))
                 {
@@ -275,6 +285,12 @@ namespace StrmAssistant.Mod
                     Plugin.Instance.Logger.Warn($"{tracker.PatchType.Name} ReversePatch Failed: {detailedMessage}");
                     Plugin.Instance.Logger.Warn($"  Method: {methodName}");
                     Plugin.Instance.Logger.Warn($"  This usually means the method signature or implementation has changed in this Emby version.");
+                }
+                else if (exceptionMessage.Contains("Method not found") || exceptionMessage.Contains("does not exist"))
+                {
+                    Plugin.Instance.Logger.Warn($"{tracker.PatchType.Name} ReversePatch Failed: Method not found or signature changed");
+                    Plugin.Instance.Logger.Warn($"  Method: {methodName}");
+                    Plugin.Instance.Logger.Warn($"  This Emby version may have changed the internal API. Attempting fallback...");
                 }
                 else
                 {
@@ -296,7 +312,11 @@ namespace StrmAssistant.Mod
                 }
 
                 tracker.FallbackPatchApproach = PatchApproach.Reflection;
-                Plugin.Instance.Logger.Info($"{tracker.PatchType.Name} will use Reflection approach as fallback (this is normal and expected)");
+                
+                if (!isKnownLimitation)
+                {
+                    Plugin.Instance.Logger.Info($"{tracker.PatchType.Name} will use Reflection approach as fallback (this is normal and expected)");
+                }
             }
 
             return false;
@@ -317,7 +337,7 @@ namespace StrmAssistant.Mod
             if (HarmonyMod == null)
             {
                 Plugin.Instance.Logger.Error($"{tracker.PatchType.Name} PatchUnpatch Failed: HarmonyMod is not initialized");
-                tracker.FallbackPatchApproach = PatchApproach.None;
+                tracker.FallbackPatchApproach = PatchApproach.Reflection;
                 return false;
             }
 
@@ -360,18 +380,51 @@ namespace StrmAssistant.Mod
             }
             catch (Exception he)
             {
-                Plugin.Instance.Logger.Warn($"{tracker.PatchType.Name} {action} Failed: {he.Message}");
-                Plugin.Instance.Logger.Warn($"Target: {(targetMethod.DeclaringType != null ? targetMethod.DeclaringType.Name + "." : string.Empty)}{targetMethod.Name}");
+                var methodName = targetMethod.DeclaringType != null ? $"{targetMethod.DeclaringType.Name}.{targetMethod.Name}" : targetMethod.Name;
+                
+                // 检测常见错误类型并提供更好的诊断信息
+                bool canFallbackToReflection = true;
+                
+                if (he is ArgumentException && he.Message.Contains("Method") && he.Message.Contains("not found"))
+                {
+                    Plugin.Instance.Logger.Warn($"{tracker.PatchType.Name} {action} Failed: Target method not found");
+                    Plugin.Instance.Logger.Warn($"  Method: {methodName}");
+                    Plugin.Instance.Logger.Warn($"  This Emby version may have removed or renamed this method.");
+                    canFallbackToReflection = false;
+                }
+                else if (he.Message.Contains("IL") || he.Message.Contains("instruction"))
+                {
+                    Plugin.Instance.Logger.Warn($"{tracker.PatchType.Name} {action} Failed: IL manipulation error");
+                    Plugin.Instance.Logger.Warn($"  Method: {methodName}");
+                    Plugin.Instance.Logger.Info($"  The method IL structure may have changed. Attempting reflection fallback...");
+                }
+                else
+                {
+                    Plugin.Instance.Logger.Warn($"{tracker.PatchType.Name} {action} Failed: {he.Message}");
+                    Plugin.Instance.Logger.Warn($"  Target: {methodName}");
+                }
                 
                 if (Plugin.Instance.DebugMode)
                 {
                     Plugin.Instance.Logger.Debug($"Exception type: {he.GetType().Name}");
                     Plugin.Instance.Logger.Debug($"Prefix: {prefix}, Postfix: {postfix}, Transpiler: {transpiler}, Finalizer: {finalizer}");
                     Plugin.Instance.Logger.Debug(he.StackTrace);
+                    if (he.InnerException != null)
+                    {
+                        Plugin.Instance.Logger.Debug($"Inner exception: {he.InnerException}");
+                    }
                 }
 
-                tracker.FallbackPatchApproach = PatchApproach.Reflection;
-                Plugin.Instance.Logger.Info($"{tracker.PatchType.Name} will use Reflection approach as fallback");
+                tracker.FallbackPatchApproach = canFallbackToReflection ? PatchApproach.Reflection : PatchApproach.None;
+                
+                if (canFallbackToReflection)
+                {
+                    Plugin.Instance.Logger.Info($"{tracker.PatchType.Name} will use Reflection approach as fallback");
+                }
+                else
+                {
+                    Plugin.Instance.Logger.Error($"{tracker.PatchType.Name} feature is not available on this Emby version");
+                }
             }
 
             return false;

@@ -50,31 +50,63 @@ namespace StrmAssistant.Common
 
             try
             {
-                var embyProviders = Assembly.Load("Emby.Providers");
-                var subtitleResolverType = embyProviders.GetType("Emby.Providers.MediaInfo.SubtitleResolver");
-                var subtitleResolverConstructor = subtitleResolverType.GetConstructor(new[]
+                var embyProviders = EmbyVersionCompatibility.TryLoadAssembly("Emby.Providers");
+                if (embyProviders == null)
                 {
-                    typeof(ILocalizationManager), typeof(IFileSystem), typeof(ILibraryManager)
-                });
-                _subtitleResolver = subtitleResolverConstructor?.Invoke(new object[]
-                {
-                    localizationManager, fileSystem, libraryManager
-                });
-                _getExternalSubtitleStreams = subtitleResolverType.GetMethod("GetExternalSubtitleStreams");
+                    _logger.Error($"{nameof(SubtitleApi)} - Failed to load Emby.Providers assembly");
+                    PatchTracker.FallbackPatchApproach = PatchApproach.None;
+                    return;
+                }
 
-                var ffProbeSubtitleInfoType = embyProviders.GetType("Emby.Providers.MediaInfo.FFProbeSubtitleInfo");
-                var ffProbeSubtitleInfoConstructor = ffProbeSubtitleInfoType.GetConstructor(new[]
+                var subtitleResolverType = EmbyVersionCompatibility.TryGetType(embyProviders, "Emby.Providers.MediaInfo.SubtitleResolver");
+                if (subtitleResolverType != null)
                 {
-                    typeof(IMediaProbeManager)
-                });
-                _ffProbeSubtitleInfo = ffProbeSubtitleInfoConstructor?.Invoke(new object[] { mediaProbeManager });
-                _updateExternalSubtitleStream = ffProbeSubtitleInfoType.GetMethod("UpdateExternalSubtitleStream");
+                    var subtitleResolverConstructor = subtitleResolverType.GetConstructor(new[]
+                    {
+                        typeof(ILocalizationManager), typeof(IFileSystem), typeof(ILibraryManager)
+                    });
+                    
+                    if (subtitleResolverConstructor != null)
+                    {
+                        _subtitleResolver = subtitleResolverConstructor.Invoke(new object[]
+                        {
+                            localizationManager, fileSystem, libraryManager
+                        });
+                        _getExternalSubtitleStreams = subtitleResolverType.GetMethod("GetExternalSubtitleStreams");
+                        
+                        if (Plugin.Instance.DebugMode && _getExternalSubtitleStreams != null)
+                        {
+                            _logger.Debug($"{nameof(SubtitleApi)}: SubtitleResolver initialized successfully");
+                        }
+                    }
+                }
+
+                var ffProbeSubtitleInfoType = EmbyVersionCompatibility.TryGetType(embyProviders, "Emby.Providers.MediaInfo.FFProbeSubtitleInfo");
+                if (ffProbeSubtitleInfoType != null)
+                {
+                    var ffProbeSubtitleInfoConstructor = ffProbeSubtitleInfoType.GetConstructor(new[]
+                    {
+                        typeof(IMediaProbeManager)
+                    });
+                    
+                    if (ffProbeSubtitleInfoConstructor != null)
+                    {
+                        _ffProbeSubtitleInfo = ffProbeSubtitleInfoConstructor.Invoke(new object[] { mediaProbeManager });
+                        _updateExternalSubtitleStream = ffProbeSubtitleInfoType.GetMethod("UpdateExternalSubtitleStream");
+                        
+                        if (Plugin.Instance.DebugMode && _updateExternalSubtitleStream != null)
+                        {
+                            _logger.Debug($"{nameof(SubtitleApi)}: FFProbeSubtitleInfo initialized successfully");
+                        }
+                    }
+                }
             }
             catch (Exception e)
             {
+                _logger.Error($"{nameof(SubtitleApi)} - Failed to initialize reflection components: {e.Message}");
                 if (Plugin.Instance.DebugMode)
                 {
-                    _logger.Debug(e.Message);
+                    _logger.Debug($"Exception type: {e.GetType().Name}");
                     _logger.Debug(e.StackTrace);
                 }
             }
@@ -82,18 +114,47 @@ namespace StrmAssistant.Common
             if (_subtitleResolver is null || _getExternalSubtitleStreams is null ||
                 _ffProbeSubtitleInfo is null || _updateExternalSubtitleStream is null)
             {
-                _logger.Warn($"{PatchTracker.PatchType.Name} - Reflection methods not available");
-                // 外挂字幕扫描功能可能仍然可用（通过公共API），标记为Reflection而不是None
-                // 如果确实不可用，会在实际使用时返回空列表，不影响整体状态
+                _logger.Warn($"{nameof(SubtitleApi)} - Some reflection methods not available");
+                
+                // 检查哪些组件不可用
+                if (_subtitleResolver == null) _logger.Warn("  - SubtitleResolver not initialized");
+                if (_getExternalSubtitleStreams == null) _logger.Warn("  - GetExternalSubtitleStreams method not found");
+                if (_ffProbeSubtitleInfo == null) _logger.Warn("  - FFProbeSubtitleInfo not initialized");
+                if (_updateExternalSubtitleStream == null) _logger.Warn("  - UpdateExternalSubtitleStream method not found");
+                
+                // 外挂字幕扫描功能可能仍然可用（通过公共API或部分功能），标记为Reflection而不是None
                 PatchTracker.FallbackPatchApproach = PatchApproach.Reflection;
-                _logger.Info($"{PatchTracker.PatchType.Name} - Some features may be limited, but basic functionality should work");
+                _logger.Info($"{nameof(SubtitleApi)} - Using fallback approach. Some features may be limited.");
+                
+                EmbyVersionCompatibility.LogCompatibilityInfo(
+                    nameof(SubtitleApi),
+                    false,
+                    "Some internal APIs not found - fallback mode active");
             }
             else if (Plugin.Instance.IsModSupported)
             {
-                PatchManager.ReversePatch(PatchTracker, _getExternalSubtitleStreams,
+                var patch1 = PatchManager.ReversePatch(PatchTracker, _getExternalSubtitleStreams,
                     nameof(GetExternalSubtitleStreamsStub));
-                PatchManager.ReversePatch(PatchTracker, _updateExternalSubtitleStream,
+                var patch2 = PatchManager.ReversePatch(PatchTracker, _updateExternalSubtitleStream,
                     nameof(UpdateExternalSubtitleStreamStub));
+                
+                if ((patch1 || patch2) && PatchTracker.FallbackPatchApproach == PatchApproach.Harmony)
+                {
+                    _logger.Info($"{nameof(SubtitleApi)} - Harmony patches applied successfully");
+                }
+                
+                EmbyVersionCompatibility.LogCompatibilityInfo(
+                    nameof(SubtitleApi),
+                    true,
+                    $"Using {PatchTracker.FallbackPatchApproach} approach");
+            }
+            else
+            {
+                _logger.Info($"{nameof(SubtitleApi)} - Reflection approach active");
+                EmbyVersionCompatibility.LogCompatibilityInfo(
+                    nameof(SubtitleApi),
+                    true,
+                    "Reflection mode (Harmony not supported on platform)");
             }
         }
 
@@ -110,13 +171,59 @@ namespace StrmAssistant.Common
             switch (PatchTracker.FallbackPatchApproach)
             {
                 case PatchApproach.Harmony:
-                    return GetExternalSubtitleStreamsStub(_subtitleResolver, item, startIndex, directoryService,
-                        namingOptions, clearCache);
+                    try
+                    {
+                        return GetExternalSubtitleStreamsStub(_subtitleResolver, item, startIndex, directoryService,
+                            namingOptions, clearCache);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Error($"Harmony stub failed in GetExternalSubtitleStreams: {ex.Message}");
+                        if (Plugin.Instance.DebugMode)
+                        {
+                            _logger.Debug(ex.StackTrace);
+                        }
+                        // 降级到反射
+                        PatchTracker.FallbackPatchApproach = PatchApproach.Reflection;
+                        return GetExternalSubtitleStreams(item, startIndex, directoryService, clearCache);
+                    }
+                    
                 case PatchApproach.Reflection:
-                    return (List<MediaStream>)_getExternalSubtitleStreams.Invoke(_subtitleResolver,
-                        new object[] { item, startIndex, directoryService, namingOptions, clearCache });
+                    if (_subtitleResolver == null || _getExternalSubtitleStreams == null)
+                    {
+                        _logger.Warn("Subtitle resolver not available, returning empty list");
+                        return new List<MediaStream>();
+                    }
+                    
+                    try
+                    {
+                        var result = _getExternalSubtitleStreams.Invoke(_subtitleResolver,
+                            new object[] { item, startIndex, directoryService, namingOptions, clearCache });
+                        return result as List<MediaStream> ?? new List<MediaStream>();
+                    }
+                    catch (TargetInvocationException tie)
+                    {
+                        var innerEx = tie.InnerException ?? tie;
+                        _logger.Error($"Failed to invoke GetExternalSubtitleStreams: {innerEx.Message}");
+                        if (Plugin.Instance.DebugMode)
+                        {
+                            _logger.Debug(innerEx.StackTrace);
+                        }
+                        return new List<MediaStream>();
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Error($"Reflection failed in GetExternalSubtitleStreams: {ex.Message}");
+                        if (Plugin.Instance.DebugMode)
+                        {
+                            _logger.Debug(ex.StackTrace);
+                        }
+                        return new List<MediaStream>();
+                    }
+                    
                 default:
-                    throw new NotImplementedException();
+                    _logger.Warn("GetExternalSubtitleStreams: Unknown patch approach, returning empty list");
+                    return new List<MediaStream>();
             }
         }
 
@@ -136,13 +243,68 @@ namespace StrmAssistant.Common
             switch (PatchTracker.FallbackPatchApproach)
             {
                 case PatchApproach.Harmony:
-                    return UpdateExternalSubtitleStreamStub(_ffProbeSubtitleInfo, item, subtitleStream, options,
-                        libraryOptions, cancellationToken);
+                    try
+                    {
+                        return UpdateExternalSubtitleStreamStub(_ffProbeSubtitleInfo, item, subtitleStream, options,
+                            libraryOptions, cancellationToken);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Error($"Harmony stub failed in UpdateExternalSubtitleStream: {ex.Message}");
+                        if (Plugin.Instance.DebugMode)
+                        {
+                            _logger.Debug(ex.StackTrace);
+                        }
+                        // 降级到反射
+                        PatchTracker.FallbackPatchApproach = PatchApproach.Reflection;
+                        return UpdateExternalSubtitleStream(item, subtitleStream, options, cancellationToken);
+                    }
+                    
                 case PatchApproach.Reflection:
-                    return (Task<bool>)_updateExternalSubtitleStream.Invoke(_ffProbeSubtitleInfo,
-                        new object[] { item, subtitleStream, options, libraryOptions, cancellationToken });
+                    if (_ffProbeSubtitleInfo == null || _updateExternalSubtitleStream == null)
+                    {
+                        _logger.Warn("FFProbe subtitle info not available, returning false");
+                        return Task.FromResult(false);
+                    }
+                    
+                    try
+                    {
+                        var result = _updateExternalSubtitleStream.Invoke(_ffProbeSubtitleInfo,
+                            new object[] { item, subtitleStream, options, libraryOptions, cancellationToken });
+                        
+                        if (result is Task<bool> taskResult)
+                        {
+                            return taskResult;
+                        }
+                        else
+                        {
+                            _logger.Warn($"Unexpected return type from UpdateExternalSubtitleStream: {result?.GetType().Name}");
+                            return Task.FromResult(false);
+                        }
+                    }
+                    catch (TargetInvocationException tie)
+                    {
+                        var innerEx = tie.InnerException ?? tie;
+                        _logger.Error($"Failed to invoke UpdateExternalSubtitleStream: {innerEx.Message}");
+                        if (Plugin.Instance.DebugMode)
+                        {
+                            _logger.Debug(innerEx.StackTrace);
+                        }
+                        return Task.FromResult(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Error($"Reflection failed in UpdateExternalSubtitleStream: {ex.Message}");
+                        if (Plugin.Instance.DebugMode)
+                        {
+                            _logger.Debug(ex.StackTrace);
+                        }
+                        return Task.FromResult(false);
+                    }
+                    
                 default:
-                    throw new NotImplementedException();
+                    _logger.Warn("UpdateExternalSubtitleStream: Unknown patch approach, returning false");
+                    return Task.FromResult(false);
             }
         }
 
