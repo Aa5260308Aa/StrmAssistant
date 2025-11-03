@@ -10,6 +10,7 @@ using StrmAssistant.IntroSkip;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using static StrmAssistant.Options.IntroSkipOptions;
 using static StrmAssistant.Options.Utility;
 
